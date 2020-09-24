@@ -62,11 +62,6 @@ class Enmap extends Map {
    * (to your project root) or absolute on the disk. Windows users , remember to escape your backslashes!
    * @param {string} [options.cloneLevel] Defaults to deep. Determines how objects and arrays are treated when inserting and retrieving from the database.
    * See https://enmap.evie.codes/usage#enmap-options for more details on this option.
-   * @param {boolean} [options.polling] defaults to `false`. Determines whether Enmap will attempt to retrieve changes from the database on a regular interval.
-   * This means that if another Enmap in another process modifies a value, this change will be reflected in ALL enmaps using the polling feature.
-   * @param {string} [options.pollingInterval] defaults to `1000`, polling every second. Delay in milliseconds to poll new data from the database.
-   * The shorter the interval, the more CPU is used, so it's best not to lower this. Polling takes about 350-500ms if no data is found, and time will
-   * grow with more changes fetched. In my tests, 15 rows took a little more than 1 second, every second.
    * @param {boolean} [options.ensureProps] defaults to `true`. If enabled and the value in the enmap is an object, using ensure() will also ensure that
    * every property present in the default object will be added to the value, if it's absent. See ensure API reference for more information.
    * @param {*} [options.autoEnsure] default is disabled. When provided a value, essentially runs ensure(key, autoEnsure) automatically so you don't have to.
@@ -156,15 +151,9 @@ class Enmap extends Map {
       this[_defineSetting]('autoFetch', 'Boolean', true, true, options.autoFetch);
       this[_defineSetting]('autoEnsure', 'any', true, this.off, options.autoEnsure);
       this[_defineSetting]('wal', 'Boolean', true, true, options.wal);
-      this[_defineSetting]('polling', 'Boolean', true, false, options.polling);
-      this[_defineSetting]('pollingInterval', 'Number', true, 1000, options.pollingInterval);
       this[_defineSetting]('defer', 'Promise', true, new Promise((res) =>
         this[_defineSetting]('ready', 'Function', false, res))
       );
-
-      if(this.polling) {
-        console.warn('WARNING: Polling features will be removed in Enmap v6. If you need enmap in multiple processes, please consider moving to JOSH, https://josh.evie.dev/');
-      }
 
       this[_validateName]();
       this[_init](database);
@@ -655,9 +644,6 @@ class Enmap extends Map {
     } else {
       super.delete(key);
       if (this.persistent) {
-        if (this.polling) {
-          this.db.prepare(`INSERT INTO 'internal::changes::${this.name}' (type, key, timestamp, pid) VALUES (?, ?, ?, ?);`).run('delete', key.toString(), Date.now(), process.pid);
-        }
         this.db.prepare(`DELETE FROM ${this.name} WHERE key = ?`).run(key);
         return this;
       }
@@ -670,23 +656,15 @@ class Enmap extends Map {
 
   /**
    * Deletes everything from the enmap. If persistent, clears the database of all its data for this table.
+   * @returns {null}
    */
-  deleteAll() {
+  clear() { 
     this[_readyCheck]();
     if (this.persistent) {
       this.db.prepare(`DELETE FROM ${this.name};`).run();
-      if (this.polling) {
-        this.db.prepare(`INSERT INTO 'internal::changes::${this.name}' (type, timestamp, pid) VALUES (?, ?, ?);`).run('clear', Date.now(), process.pid);
-      }
     }
     super.clear();
-  }
-
-  /**
-   * Deletes everything from the enmap. If persistent, clears the database of all its data for this table.
-   * @returns {null}
-   */
-  clear() { return this.deleteAll(); }
+   }
 
   /**
    * Completely destroys the entire enmap. This deletes the database tables entirely.
@@ -707,7 +685,6 @@ class Enmap extends Map {
 
     transaction([
       `DROP TABLE IF EXISTS ${this.name};`,
-      `DROP TABLE IF EXISTS 'internal::changes::${this.name}';`,
       `DELETE FROM 'internal::autonum' WHERE enmap = '${this.name}';`
     ]);
     return null;
@@ -846,50 +823,15 @@ class Enmap extends Map {
       this.db.pragma('synchronous = 1');
       if (this.wal) this.db.pragma('journal_mode = wal');
     }
-    this.db.prepare(`CREATE TABLE IF NOT EXISTS 'internal::changes::${this.name}' (type TEXT, key TEXT, value TEXT, timestamp INTEGER, pid INTEGER);`).run();
     this.db.prepare(`CREATE TABLE IF NOT EXISTS 'internal::autonum' (enmap TEXT PRIMARY KEY, lastnum INTEGER)`).run();
     if (this.fetchAll) {
       await this.fetchEverything();
     }
-    // TEMPORARY MIGRATE CODE FOR AUTONUM
-    // REMOVE FOR V6
-    if (this.has('internal::autonum')) {
-      this.db.prepare("INSERT OR REPLACE INTO 'internal::autonum' (enmap, lastnum) VALUES (?, ?)").run(this.name, this.get('internal::autonum'));
-      this.delete('internal::autonum');
-    } else {
-      const row = this.db.prepare("SELECT lastnum FROM 'internal::autonum' WHERE enmap = ?").get(this.name);
-      if (!row) {
-        this.db.prepare("INSERT INTO 'internal::autonum' (enmap, lastnum) VALUES (?, ?)").run(this.name, 0);
-      }
+    const row = this.db.prepare("SELECT lastnum FROM 'internal::autonum' WHERE enmap = ?").get(this.name);
+    if (!row) {
+      this.db.prepare("INSERT INTO 'internal::autonum' (enmap, lastnum) VALUES (?, ?)").run(this.name, 0);
     }
 
-    if (this.polling) {
-      Object.defineProperty(this, 'lastSync', {
-        value: new Date(),
-        writable: true,
-        enumerable: false,
-        configurable: false
-      });
-      setInterval(() => {
-        const changes = this.db.prepare(`SELECT type, key, value FROM 'internal::changes::${this.name}' WHERE timestamp >= ? AND pid <> ? ORDER BY timestamp ASC;`)
-          .all(this.lastSync.getTime(), process.pid);
-        for (const row of changes) {
-          switch (row.type) {
-          case 'insert':
-            super.set(row.key, this[_parseData](row.value, row.key));
-            break;
-          case 'delete':
-            super.delete(row.key);
-            break;
-          case 'clear':
-            super.clear();
-            break;
-          }
-        }
-        this.lastSync = new Date();
-        this.db.prepare(`DELETE FROM 'internal::changes::${this.name}' WHERE ROWID IN (SELECT ROWID FROM 'internal::changes::${this.name}' ORDER BY ROWID DESC LIMIT -1 OFFSET 100);`).run();
-      }, this.pollingInterval);
-    }
     this.ready();
     return this.defer;
   }
@@ -1046,10 +988,6 @@ class Enmap extends Map {
         serialized = serialize(this.serializer(onChange.target(value), key));
       }
       this.db.prepare(`INSERT OR REPLACE INTO ${this.name} (key, value) VALUES (?, ?);`).run(key, serialized);
-      if (this.polling) {
-        this.db.prepare(`INSERT INTO 'internal::changes::${this.name}' (type, key, value, timestamp, pid) VALUES (?, ?, ?, ?, ?);`)
-          .run('insert', key, serialized, Date.now(), process.pid);
-      }
     }
     if(updateCache) super.set(key, value);
     return this;
@@ -1351,179 +1289,6 @@ class Enmap extends Map {
     }
     return newColl;
   }
-
-
-  /* DEPRECATED METHODS */
-  /* TO BE REMOVED IN VERSION 6 */
-
-  /**
-   * Partitions the enmap into two enmaps where the first enmap
-   * contains the items that passed and the second contains the items that failed.
-   * DEPRECATION WARNING: WILL BE REMOVED IN ENMAP 6!
-   * @param {Function} fn Function used to test (should return a boolean)
-   * @param {*} [thisArg] Value to use as `this` when executing function
-   * @returns {Enmap[]}
-   * @example const [big, small] = enmap.partition(guild => guild.memberCount > 250);
-   */
-  partition(fn, thisArg) {
-    console.warn('ENMAP DEPRECATION WARNING: partition() will be removed in the next major Enmap release (v6)!');
-    this[_readyCheck]();
-    if (typeof thisArg !== 'undefined') fn = fn.bind(thisArg);
-    const results = [new this.constructor(), new this.constructor()];
-    for (const [key, val] of this) {
-      if (fn(val, key, this)) {
-        results[0].set(key, val);
-      } else {
-        results[1].set(key, val);
-      }
-    }
-    return results;
-  }
-
-  /**
-   * Checks if this Enmap shares identical key-value pairings with another.
-   * This is different to checking for equality using equal-signs, because
-   * the Enmaps may be different objects, but contain the same data.
-   * DEPRECATION WARNING: WILL BE REMOVED IN ENMAP 6!
-   * @param {Enmap} enmap Enmap to compare with
-   * @returns {boolean} Whether the Enmaps have identical contents
-   */
-  equals(enmap) {
-    console.warn('ENMAP DEPRECATION WARNING: equals() will be removed in the next major Enmap release (v6)!');
-    this[_readyCheck]();
-    if (!enmap) return false;
-    if (this === enmap) return true;
-    if (this.size !== enmap.size) return false;
-    return !this.find((value, key) => {
-      const testVal = enmap.get(key);
-      return testVal !== value || (testVal === undefined && !enmap.has(key));
-    });
-  }
-
-  /**
-   * Modify the property of a value inside the enmap, if the value is an object or array.
-   * This is a shortcut to loading the key, changing the value, and setting it back.
-   * DEPRECATION WARNING: WILL BE REMOVED IN ENMAP 6! Use set() instead!
-   * @param {string} key Required. The key of the element to add to The Enmap or array.
-   * This value MUST be a string or number.
-   * @param {string} path Required. The property to modify inside the value object or array.
-   * Can be a path with dot notation, such as "prop1.subprop2.subprop3"
-   * @param {*} val Required. The value to apply to the specified property.
-   * @returns {Enmap} The enmap.
-   */
-  setProp(key, path, val) {
-    console.warn('ENMAP DEPRECATION WARNING: setProp() will be removed in the next major Enmap release (v6)! Please use set(key, value, path) instead.');
-    this[_readyCheck]();
-    if (isNil(path)) throw new Err(`No path provided to set a property in "${key}" of enmap "${this.name}"`, 'EnmapPathError');
-    return this.set(key, val, path);
-  }
-
-  /**
-   * Push to an array element inside an Object or Array element in Enmap.
-   * DEPRECATION WARNING: WILL BE REMOVED IN ENMAP 6! Use push() instead!
-   * @param {string} key Required. The key of the element.
-   * This value MUST be a string or number.
-   * @param {string} path Required. The name of the array property to push to.
-   * Can be a path with dot notation, such as "prop1.subprop2.subprop3"
-   * @param {*} val Required. The value push to the array property.
-   * @param {boolean} allowDupes Allow duplicate values in the array (default: false).
-   * @returns {Enmap} The enmap.
-   */
-  pushIn(key, path, val, allowDupes = false) {
-    console.warn('ENMAP DEPRECATION WARNING: pushIn() will be removed in the next major Enmap release (v6)! Please use push(key, value, path) instead.');
-    this[_readyCheck]();
-    this[_fetchCheck](key);
-    if (isNil(path)) throw new Err(`No path provided to push a value in "${key}" of enmap "${this.name}"`, 'EnmapPathError');
-    return this.push(key, val, path, allowDupes);
-  }
-
-  /**
-   * Returns the specific property within a stored value. If the key does not exist or the value is not an object, throws an error.
-   * DEPRECATION WARNING: WILL BE REMOVED IN ENMAP 6! Use get() instead!
-   * @param {string} key Required. The key of the element to get from The Enmap.
-   * @param {string} path Required. The property to retrieve from the object or array.
-   * Can be a path with dot notation, such as "prop1.subprop2.subprop3"
-   * @return {*} The value of the property obtained.
-   */
-  getProp(key, path) {
-    console.warn('ENMAP DEPRECATION WARNING: getProp() will be removed in the next major Enmap release (v6)! Please use get(key, path) instead.');
-    this[_readyCheck]();
-    this[_fetchCheck](key);
-    if (isNil(path)) throw new Err(`No path provided to get a property from "${key}" of enmap "${this.name}"`, 'EnmapPathError');
-    return this.get(key, path);
-  }
-
-  /**
-   * Delete a property from an object or array value in Enmap.
-   * DEPRECATION WARNING: WILL BE REMOVED IN ENMAP 6! Use delete() instead!
-   * @param {string} key Required. The key of the element to delete the property from in Enmap.
-   * @param {string} path Required. The name of the property to remove from the object.
-   * Can be a path with dot notation, such as "prop1.subprop2.subprop3"
-   */
-  deleteProp(key, path) {
-    console.warn('ENMAP DEPRECATION WARNING: deleteProp() will be removed in the next major Enmap release (v6)! Please use delete(key, path) instead.');
-    this[_readyCheck]();
-    this[_fetchCheck](key);
-    if (isNil(path)) throw new Err(`No path provided to delete a property in "${key}" of enmap "${this.name}"`, 'EnmapPathError');
-    this.delete(key, path);
-  }
-
-  /**
-   * Remove a value from an Array or Object property inside an Array or Object element in Enmap.
-   * Confusing? Sure is.
-   * DEPRECATION WARNING: WILL BE REMOVED IN ENMAP 6! Use remove() instead!
-   * @param {string} key Required. The key of the element.
-   * This value MUST be a string or number.
-   * @param {string} path Required. The name of the array property to remove from.
-   * Can be a path with dot notation, such as "prop1.subprop2.subprop3"
-   * @param {*} val Required. The value to remove from the array property.
-   * @returns {Enmap} The enmap.
-   */
-  removeFrom(key, path, val) {
-    console.warn('ENMAP DEPRECATION WARNING: removeFrom() will be removed in the next major Enmap release (v6)! Please use remove(key, value, path) instead.');
-    this[_readyCheck]();
-    this[_fetchCheck](key);
-    if (isNil(path)) throw new Err(`No path provided to remove an array element in "${key}" of enmap "${this.name}"`, 'EnmapPathError');
-    return this.remove(key, val, path);
-  }
-
-  /**
-   * Returns whether or not the property exists within an object or array value in enmap.
-   * DEPRECATION WARNING: WILL BE REMOVED IN ENMAP 6! Use has() instead!
-   * @param {string} key Required. The key of the element to check in the Enmap or array.
-   * @param {*} path Required. The property to verify inside the value object or array.
-   * Can be a path with dot notation, such as "prop1.subprop2.subprop3"
-   * @return {boolean} Whether the property exists.
-   */
-  hasProp(key, path) {
-    console.warn('ENMAP DEPRECATION WARNING: hasProp() will be removed in the next major Enmap release (v6)! Please use has(key, path) instead.');
-    this[_readyCheck]();
-    this[_fetchCheck](key);
-    if (isNil(path)) throw new Err(`No path provided to check for a property in "${key}" of enmap "${this.name}"`, 'EnmapPathError');
-    return this.has(key, path);
-  }
-
-  /**
-   * Searches for the existence of a single item where its specified property's value is identical to the given value
-   * (`item[prop] === value`).
-   * <warn>Do not use this to check for an item by its ID. Instead, use `enmap.has(id)`. See
-   * [MDN](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Map/has) for details.</warn>
-   * DEPRECATION WARNING: WILL BE REMOVED IN ENMAP 6! Use has("key", "path") instead!
-   * @param {string} prop The property to test against
-   * @param {*} value The expected value
-   * @returns {boolean}
-   * @example
-   * if (enmap.exists('username', 'Bob')) {
-   *  console.log('user here!');
-   * }
-   */
-  exists(prop, value) {
-    console.warn('ENMAP DEPRECATION WARNING: exists() will be removed in the next major Enmap release (v6)! Please use has(key, path) instead.');
-    this[_readyCheck]();
-    return Boolean(this.find(prop, value));
-  }
-
-  /* END DEPRECATED METHODS */
 
 }
 
