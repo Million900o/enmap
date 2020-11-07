@@ -3,7 +3,6 @@ const {
   get: _get,
   set: _set,
   has: _has,
-  delete: _delete,
   isNil,
   isFunction,
   isArray,
@@ -116,7 +115,7 @@ class Enmap extends Map {
     this[_defineSetting]('deserializer', 'Function', true, (data) => data, options.deserializer);
 
     if (options.name) {
-      if(options.name === '::memory::') {
+      if (options.name === '::memory::') {
         // This option is "secret" and used for testing but if you're reading this
         // and you want an in-memory DB with all the features, with double the memory, knock yourself out!
         this.inMemory = true;
@@ -136,9 +135,9 @@ class Enmap extends Map {
       }
 
       const dataDir = resolve(process.cwd(), options.dataDir || 'data');
-      const database = this.inMemory
-        ? new Database(':memory:')
-        : new Database(`${dataDir}${sep}enmap.sqlite`);
+      const database = this.inMemory ?
+        new Database(':memory:') :
+        new Database(`${dataDir}${sep}enmap.sqlite`);
 
       // [_defineSetting](name, type, writable, defaultValue [, value]) {
 
@@ -221,14 +220,15 @@ class Enmap extends Map {
    * @param {*} valueOrFunction Either an object to merge with the existing value, or a function that provides the existing object
    * and expects a new object as a return value. In the case of a straight value, the merge is recursive and will add any missing level.
    * If using a function, it is your responsibility to merge the objects together correctly.
+   * @return {*} The updated, merged value.
    * @example
    * // Define an object we're going to update
    * enmap.set("obj", { a: 1, b: 2, c: 3 });
-   * 
+   *
    * // Direct merge
    * enmap.update("obj", { d: 4, e: 5 });
    * // obj is now { a: 1, b: 2, c: 3, d: 4, e: 5 }
-   * 
+   *
    * // Functional update
    * enmap.update("obj", (previous) => ({
    *   ...obj,
@@ -269,7 +269,7 @@ class Enmap extends Map {
     if (isNil(key)) return null;
     this[_fetchCheck](key);
     key = key.toString();
-    if(this.autoEnsure !== this.off && !this.has(key)) {
+    if (this.autoEnsure !== this.off && !this.has(key)) {
       this[_internalSet](key, this.autoEnsure);
     }
     const data = super.get(key);
@@ -321,7 +321,7 @@ class Enmap extends Map {
    */
   fetchEverything() {
     this[_readyCheck]();
-    const rows = this.db.prepare(`SELECT * FROM ${this.name};`).all();
+    const rows = this.db.prepare(`SELECT * FROM '${this.name};'`).all();
     for (const row of rows) {
       const val = this[_parseData](row.value, row.key);
       super.set(row.key, val);
@@ -337,13 +337,13 @@ class Enmap extends Map {
   fetch(keyOrKeys) {
     this[_readyCheck]();
     if (isArray(keyOrKeys)) {
-      const data = this.db.prepare(`SELECT * FROM ${this.name} WHERE key IN (${'?, '.repeat(keyOrKeys.length).slice(0, -2)})`).all(keyOrKeys);
+      const data = this.db.prepare(`SELECT * FROM '${this.name}' WHERE key IN (${'?, '.repeat(keyOrKeys.length).slice(0, -2)})`).all(keyOrKeys);
       for (const row of data) {
         super.set(row.key, this[_parseData](row.value, row.key));
       }
       return this;
     } else {
-      const data = this.db.prepare(`SELECT * FROM ${this.name} WHERE key = ?;`).get(keyOrKeys);
+      const data = this.db.prepare(`SELECT * FROM '${this.name}' WHERE key = ?;`).get(keyOrKeys);
       if (!data) return null;
       super.set(keyOrKeys, this[_parseData](data.value, keyOrKeys));
       return this[_parseData](data.value, keyOrKeys);
@@ -537,8 +537,10 @@ class Enmap extends Map {
   ensure(key, defaultValue, path = null) {
     this[_readyCheck]();
     this[_fetchCheck](key);
-    if(this.autoEnsure !== this.off) {
-      if(!isNil(defaultValue)) console.warn(`WARNING: Saving "${key}" autoEnsure value was provided for this enmap but a default value has also been provided. The defaultValue will be ignored, autoEnsure value is used instead.`);
+    if (this.autoEnsure !== this.off) {
+      // eslint-disable-next-line
+      if (!isNil(defaultValue)) console.warn(`WARNING: Saving "${key}" autoEnsure value was provided for this enmap but a default value has also been provided.
+The defaultValue will be ignored, autoEnsure value is used instead.`);
       defaultValue = this.autoEnsure;
     }
     if (isNil(defaultValue)) throw new Err(`No default value provided on ensure method for "${key}" in "${this.name}"`, 'EnmapArgumentError');
@@ -644,7 +646,7 @@ class Enmap extends Map {
     } else {
       super.delete(key);
       if (this.persistent) {
-        this.db.prepare(`DELETE FROM ${this.name} WHERE key = ?`).run(key);
+        this.db.prepare(`DELETE FROM '${this.name}' WHERE key = ?`).run(key);
         return this;
       }
       if (typeof this.changedCB === 'function') {
@@ -656,15 +658,14 @@ class Enmap extends Map {
 
   /**
    * Deletes everything from the enmap. If persistent, clears the database of all its data for this table.
-   * @returns {null}
    */
-  clear() { 
+  clear() {
     this[_readyCheck]();
     if (this.persistent) {
       this.db.prepare(`DELETE FROM ${this.name};`).run();
     }
     super.clear();
-   }
+  }
 
   /**
    * Completely destroys the entire enmap. This deletes the database tables entirely.
@@ -684,7 +685,7 @@ class Enmap extends Map {
     });
 
     transaction([
-      `DROP TABLE IF EXISTS ${this.name};`,
+      `DROP TABLE IF EXISTS '${this.name}';`,
       `DELETE FROM 'internal::autonum' WHERE enmap = '${this.name}';`
     ]);
     return null;
@@ -753,7 +754,7 @@ class Enmap extends Map {
     if (clear) this.deleteAll();
     if (isNil(data)) throw new Err(`No data provided for import() in "${this.name}"`, 'EnmapImportError');
     try {
-      const parsed = eval('(' + data + ')');
+      const parsed = eval(`(${data})`);
       for (const thisEntry of parsed.keys) {
         const { key, value } = thisEntry;
         if (!overwrite && this.has(key)) continue;
@@ -819,7 +820,7 @@ class Enmap extends Map {
     }
     const table = this.db.prepare("SELECT count(*) FROM sqlite_master WHERE type='table' AND name = ?;").get(this.name);
     if (!table['count(*)']) {
-      this.db.prepare(`CREATE TABLE ${this.name} (key text PRIMARY KEY, value text)`).run();
+      this.db.prepare(`CREATE TABLE '${this.name}' (key text PRIMARY KEY, value text)`).run();
       this.db.pragma('synchronous = 1');
       if (this.wal) this.db.pragma('journal_mode = wal');
     }
@@ -937,7 +938,7 @@ class Enmap extends Map {
    * @returns {*} An object or the original data.
    */
   [_parseData](data, key) {
-    return this.deserializer(eval('(' + data + ')'), key);
+    return this.deserializer(eval(`(${data})`), key);
   }
 
   /*
@@ -987,9 +988,9 @@ class Enmap extends Map {
       } catch (e) {
         serialized = serialize(this.serializer(onChange.target(value), key));
       }
-      this.db.prepare(`INSERT OR REPLACE INTO ${this.name} (key, value) VALUES (?, ?);`).run(key, serialized);
+      this.db.prepare(`INSERT OR REPLACE INTO '${this.name}' (key, value) VALUES (?, ?);`).run(key, serialized);
     }
-    if(updateCache) super.set(key, value);
+    if (updateCache) super.set(key, value);
     return this;
   }
 
