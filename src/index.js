@@ -321,7 +321,7 @@ class Enmap extends Map {
    */
   fetchEverything() {
     this[_readyCheck]();
-    const rows = this.db.prepare(`SELECT * FROM '${this.name};'`).all();
+    const rows = this.db.prepare(`SELECT * FROM '${this.name}';`).all();
     for (const row of rows) {
       const val = this[_parseData](row.value, row.key);
       super.set(row.key, val);
